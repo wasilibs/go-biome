@@ -1,0 +1,448 @@
+diff --git a/crates/biome_cli/Cargo.toml b/crates/biome_cli/Cargo.toml
+index cdf315d18c..dea5c8d444 100644
+--- a/crates/biome_cli/Cargo.toml
++++ b/crates/biome_cli/Cargo.toml
+@@ -45,7 +45,6 @@ biome_json_formatter     = { workspace = true }
+ biome_json_parser        = { workspace = true }
+ biome_json_syntax        = { workspace = true }
+ biome_languages          = { workspace = true, features = ["lang_json"] }
+-biome_lsp                = { workspace = true }
+ biome_migrate            = { workspace = true }
+ biome_package            = { workspace = true }
+ biome_resolver           = { workspace = true }
+@@ -62,19 +61,12 @@ path-absolutize          = { workspace = true }
+ quick-junit              = "0.6.0"
+ rayon                    = { workspace = true }
+ regex                    = { workspace = true }
+-reqwest                  = { workspace = true, features = ["blocking", "rustls-tls"] }
+ rustc-hash               = { workspace = true }
+-self_update              = { version = "0.42.0", default-features = false, features = ["rustls"] }
+ serde                    = { workspace = true, features = ["derive"] }
+ serde_json               = { workspace = true }
+ smallvec                 = { workspace = true }
+ terminal_size            = { workspace = true }
+-tokio                    = {
+-  workspace = true,
+-  features  = ["io-std", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"]
+-}
+ tracing                  = { workspace = true }
+-tracing-appender         = "0.2.4"
+ tracing-subscriber       = { workspace = true, features = ["env-filter", "json"] }
+ tracing-tree             = "0.4.1"
+ 
+@@ -94,6 +86,26 @@ tokio                = { workspace = true, features = ["io-util"] }
+ [target.'cfg(all(target_family="unix", not(all(target_arch = "aarch64", target_env = "musl"))))'.dependencies]
+ tikv-jemallocator = { workspace = true }
+ 
++# The upgrade and daemon/LSP commands rely on networking, in-place self-upgrade,
++# and the tower-lsp server, none of which build on WebAssembly. They are gated
++# out of the source on wasm, so their dependencies are dropped here too. tokio
++# keeps its full feature set here; the wasm target below uses a reduced set
++# because tokio rejects features like `net`/`io-std` on wasm.
++[target.'cfg(not(target_family = "wasm"))'.dependencies]
++biome_lsp        = { workspace = true }
++reqwest          = { workspace = true, features = ["blocking", "rustls-tls"] }
++self_update      = { version = "0.42.0", default-features = false, features = ["rustls"] }
++tracing-appender = "0.2.4"
++tokio            = {
++  workspace = true,
++  features  = ["io-std", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"]
++}
++
++# Only the tokio features supported on wasm are enabled here (it is still needed
++# for `biome_service`'s sync primitives).
++[target.'cfg(target_family = "wasm")'.dependencies]
++tokio = { workspace = true, features = ["io-util", "macros", "rt", "sync", "time"] }
++
+ [target.'cfg(unix)'.dependencies]
+ libc  = "0.2.184"
+ tokio = { workspace = true, features = ["process"] }
+diff --git a/crates/biome_cli/src/commands/clean.rs b/crates/biome_cli/src/commands/clean.rs
+index b500ad1176..54932b75a6 100644
+--- a/crates/biome_cli/src/commands/clean.rs
++++ b/crates/biome_cli/src/commands/clean.rs
+@@ -1,4 +1,4 @@
+-use crate::commands::daemon::default_biome_log_path;
++use crate::commands::default_biome_log_path;
+ use crate::{CliDiagnostic, CliSession};
+ use biome_flags::biome_env;
+ use camino::Utf8PathBuf;
+diff --git a/crates/biome_cli/src/commands/daemon.rs b/crates/biome_cli/src/commands/daemon.rs
+index 5faa73476a..22442172c8 100644
+--- a/crates/biome_cli/src/commands/daemon.rs
++++ b/crates/biome_cli/src/commands/daemon.rs
+@@ -10,7 +10,7 @@ use biome_service::{
+     TransportError, Watcher, WatcherOptions, WorkspaceError, workspace::WorkspaceClient,
+ };
+ use camino::Utf8PathBuf;
+-use std::{env, fs, process};
++use std::{fs, process};
+ use tokio::io;
+ use tokio::runtime::Runtime;
+ use tracing::subscriber::Interest;
+@@ -185,7 +185,7 @@ pub(crate) fn read_most_recent_log_file(
+     log_path: Option<Utf8PathBuf>,
+     log_file_name_prefix: String,
+ ) -> io::Result<Option<String>> {
+-    let biome_log_path = log_path.unwrap_or(default_biome_log_path());
++    let biome_log_path = log_path.unwrap_or(super::default_biome_log_path());
+ 
+     let most_recent = fs::read_dir(biome_log_path)?
+         .flatten()
+@@ -237,13 +237,6 @@ fn setup_tracing_subscriber(log_path: Utf8PathBuf, log_file_name_prefix: String)
+         .init();
+ }
+ 
+-pub fn default_biome_log_path() -> Utf8PathBuf {
+-    match env::var_os("BIOME_LOG_PATH") {
+-        Some(directory) => Utf8PathBuf::from(directory.as_os_str().to_str().unwrap()),
+-        None => biome_fs::ensure_cache_dir().join("biome-logs"),
+-    }
+-}
+-
+ /// Tracing filter enabling:
+ /// - All spans and events at level info or higher
+ /// - All spans and events at level debug in crates whose name starts with `biome`
+diff --git a/crates/biome_cli/src/commands/explain.rs b/crates/biome_cli/src/commands/explain.rs
+index 4a732aa4f6..89fee442ca 100644
+--- a/crates/biome_cli/src/commands/explain.rs
++++ b/crates/biome_cli/src/commands/explain.rs
+@@ -1,4 +1,4 @@
+-use crate::commands::daemon::default_biome_log_path;
++use crate::commands::default_biome_log_path;
+ use crate::{CliDiagnostic, CliSession};
+ use biome_console::{ConsoleExt, markup};
+ use biome_flags::biome_env;
+diff --git a/crates/biome_cli/src/commands/mod.rs b/crates/biome_cli/src/commands/mod.rs
+index d48f587b68..74076588aa 100644
+--- a/crates/biome_cli/src/commands/mod.rs
++++ b/crates/biome_cli/src/commands/mod.rs
+@@ -37,6 +37,7 @@ use biome_fs::FileSystem;
+ use biome_service::configuration::LoadedConfiguration;
+ use biome_service::documentation::Doc;
+ use biome_service::workspace::{FixFileMode, SearchLanguage};
++#[cfg(not(target_family = "wasm"))]
+ use biome_service::{WatcherOptions, watcher_options};
+ use bpaf::Bpaf;
+ use std::ffi::OsString;
+@@ -44,17 +45,32 @@ use std::ffi::OsString;
+ pub(crate) mod check;
+ pub(crate) mod ci;
+ pub(crate) mod clean;
++#[cfg(not(target_family = "wasm"))]
+ pub(crate) mod daemon;
+ pub(crate) mod explain;
+ pub(crate) mod format;
+ pub(crate) mod init;
+ pub(crate) mod lint;
+ pub(crate) mod migrate;
++#[cfg(not(target_family = "wasm"))]
+ pub(crate) mod rage;
+ pub(crate) mod search;
++#[cfg(not(target_family = "wasm"))]
+ pub(crate) mod upgrade;
+ pub(crate) mod version;
+ 
++/// Returns the directory where the Biome daemon writes its log files.
++///
++/// Defined here (rather than in the daemon module) because it is also used by
++/// commands that are available without the daemon, such as `clean` and
++/// `explain`.
++pub(crate) fn default_biome_log_path() -> camino::Utf8PathBuf {
++    match std::env::var_os("BIOME_LOG_PATH") {
++        Some(directory) => camino::Utf8PathBuf::from(directory.as_os_str().to_str().unwrap()),
++        None => biome_fs::ensure_cache_dir().join("biome-logs"),
++    }
++}
++
+ #[derive(Debug, Clone, Bpaf)]
+ #[bpaf(options, version(VERSION))]
+ /// Biome official CLI. Use it to check the health of your project or run it to check single files.
+@@ -76,9 +92,11 @@ pub enum BiomeCommand {
+     ///
+     /// This command doesn't work for Biome binaries distributed through NPM. Use
+     /// your package manager to upgrade the `@biomejs/biome ` package instead.
++    #[cfg(not(target_family = "wasm"))]
+     #[bpaf(command)]
+     Upgrade,
+ 
++    #[cfg(not(target_family = "wasm"))]
+     #[bpaf(command)]
+     /// Prints information for debugging.
+     Rage(
+@@ -95,6 +113,7 @@ pub enum BiomeCommand {
+         bool,
+     ),
+     /// Starts the Biome daemon server process.
++    #[cfg(not(target_family = "wasm"))]
+     #[bpaf(command)]
+     Start {
+         #[bpaf(external(log_options))]
+@@ -105,6 +124,7 @@ pub enum BiomeCommand {
+     },
+ 
+     /// Stops the Biome daemon server process.
++    #[cfg(not(target_family = "wasm"))]
+     #[bpaf(command)]
+     Stop,
+ 
+@@ -541,6 +561,7 @@ pub enum BiomeCommand {
+         bool,
+     ),
+     /// Acts as a server for the Language Server Protocol over stdin/stdout.
++    #[cfg(not(target_family = "wasm"))]
+     #[bpaf(command("lsp-proxy"))]
+     LspProxy {
+         /// Bogus argument to make the command work with vscode-languageclient
+@@ -656,6 +677,7 @@ pub enum BiomeCommand {
+     /// Cleans the logs emitted by the daemon.
+     Clean,
+ 
++    #[cfg(not(target_family = "wasm"))]
+     #[bpaf(command("__run_server"), hide)]
+     RunServer {
+         #[bpaf(external(log_options))]
+@@ -667,6 +689,7 @@ pub enum BiomeCommand {
+         #[bpaf(external(watcher_options))]
+         watcher_options: WatcherOptions,
+     },
++    #[cfg(not(target_family = "wasm"))]
+     #[bpaf(command("__print_socket"), hide)]
+     PrintSocket,
+ 
+@@ -701,23 +724,22 @@ impl BiomeCommand {
+     const fn cli_options(&self) -> Option<&CliOptions> {
+         match self {
+             Self::Version(cli_options)
+-            | Self::Rage(cli_options, ..)
+             | Self::Check { cli_options, .. }
+             | Self::Lint { cli_options, .. }
+             | Self::Ci { cli_options, .. }
+             | Self::Format { cli_options, .. }
+             | Self::Migrate { cli_options, .. }
+             | Self::Search { cli_options, .. } => Some(cli_options),
++            #[cfg(not(target_family = "wasm"))]
++            Self::Rage(cli_options, ..) => Some(cli_options),
++            Self::Init(_) | Self::Explain { .. } | Self::Clean { .. } | Self::WhereAmI => None,
++            #[cfg(not(target_family = "wasm"))]
+             Self::LspProxy { .. }
+             | Self::Upgrade
+             | Self::Start { .. }
+             | Self::Stop
+-            | Self::Init(_)
+-            | Self::Explain { .. }
+             | Self::RunServer { .. }
+-            | Self::Clean { .. }
+             | Self::PrintSocket => None,
+-            Self::WhereAmI => None,
+         }
+     }
+ 
+@@ -728,19 +750,21 @@ impl BiomeCommand {
+             | Self::Ci { log_options, .. }
+             | Self::Format { log_options, .. }
+             | Self::Migrate { log_options, .. }
+-            | Self::Rage(_, log_options, ..)
+             | Self::Search { log_options, .. } => Some(log_options),
++            #[cfg(not(target_family = "wasm"))]
++            Self::Rage(_, log_options, ..) => Some(log_options),
+             Self::Version(_)
+-            | Self::Upgrade
++            | Self::Init(_)
++            | Self::Explain { .. }
++            | Self::Clean { .. }
++            | Self::WhereAmI => None,
++            #[cfg(not(target_family = "wasm"))]
++            Self::Upgrade
+             | Self::LspProxy { .. }
+             | Self::Start { .. }
+             | Self::Stop
+-            | Self::Init(_)
+-            | Self::Explain { .. }
+             | Self::RunServer { .. }
+-            | Self::Clean { .. }
+             | Self::PrintSocket => None,
+-            Self::WhereAmI => None,
+         }
+     }
+ 
+diff --git a/crates/biome_cli/src/lib.rs b/crates/biome_cli/src/lib.rs
+index 7d64750ed5..7e38409e26 100644
+--- a/crates/biome_cli/src/lib.rs
++++ b/crates/biome_cli/src/lib.rs
+@@ -22,6 +22,7 @@ mod logging;
+ mod panic;
+ pub(crate) mod reporter;
+ pub(crate) mod runner;
++#[cfg(not(target_family = "wasm"))]
+ mod service;
+ 
+ use crate::cli_options::ColorsArg;
+@@ -40,6 +41,7 @@ pub use crate::runner::watcher::{Watcher, WatcherEvent};
+ pub use diagnostics::CliDiagnostic;
+ pub use panic::setup_panic_handler;
+ pub use reporter::{DiagnosticsPayload, TraversalSummary};
++#[cfg(not(target_family = "wasm"))]
+ pub use service::{SocketTransport, open_transport};
+ 
+ pub(crate) const VERSION: &str = match option_env!("BIOME_VERSION") {
+@@ -70,15 +72,19 @@ impl<'app> CliSession<'app> {
+     pub fn run(self, command: BiomeCommand) -> Result<(), CliDiagnostic> {
+         match command {
+             BiomeCommand::Version(_) => commands::version::full_version(self),
++            #[cfg(not(target_family = "wasm"))]
+             BiomeCommand::Upgrade => commands::upgrade::upgrade(self),
++            #[cfg(not(target_family = "wasm"))]
+             BiomeCommand::Rage(_, _, daemon_logs, formatter, linter) => {
+                 commands::rage::rage(self, daemon_logs, formatter, linter)
+             }
+             BiomeCommand::Clean => commands::clean::clean(self),
++            #[cfg(not(target_family = "wasm"))]
+             BiomeCommand::Start {
+                 log_options,
+                 watcher_options,
+             } => commands::daemon::start(self, watcher_options, log_options),
++            #[cfg(not(target_family = "wasm"))]
+             BiomeCommand::Stop => commands::daemon::stop(self),
+             BiomeCommand::Check {
+                 write,
+@@ -271,6 +277,7 @@ impl<'app> CliSession<'app> {
+             ),
+             BiomeCommand::Explain { doc } => commands::explain::explain(self, doc),
+             BiomeCommand::Init(emit_jsonc) => commands::init::init(self, emit_jsonc),
++            #[cfg(not(target_family = "wasm"))]
+             BiomeCommand::LspProxy {
+                 watcher_options,
+                 stdio: _,
+@@ -316,11 +323,13 @@ impl<'app> CliSession<'app> {
+                     vcs_configuration,
+                 }),
+             ),
++            #[cfg(not(target_family = "wasm"))]
+             BiomeCommand::RunServer {
+                 stop_on_disconnect,
+                 watcher_options,
+                 log_options,
+             } => commands::daemon::run_server(stop_on_disconnect, watcher_options, log_options),
++            #[cfg(not(target_family = "wasm"))]
+             BiomeCommand::PrintSocket => commands::daemon::print_socket(),
+             BiomeCommand::WhereAmI => {
+                 if let Ok(path) = env::current_exe() {
+diff --git a/crates/biome_cli/src/main.rs b/crates/biome_cli/src/main.rs
+index 3591031c72..9aee4ded68 100644
+--- a/crates/biome_cli/src/main.rs
++++ b/crates/biome_cli/src/main.rs
+@@ -4,9 +4,10 @@
+ //!
+ //! [website]: https://biomejs.dev
+ 
++#[cfg(not(target_family = "wasm"))]
++use biome_cli::open_transport;
+ use biome_cli::{
+-    BiomeCommand, CliDiagnostic, CliSession, biome_command, open_transport, setup_panic_handler,
+-    to_color_mode,
++    BiomeCommand, CliDiagnostic, CliSession, biome_command, setup_panic_handler, to_color_mode,
+ };
+ use biome_console::{ConsoleExt, EnvConsole, markup};
+ use biome_diagnostics::{Diagnostic, PrintDiagnostic, set_bottom_frame};
+@@ -14,7 +15,6 @@ use biome_fs::OsFileSystem;
+ use biome_service::workspace;
+ use std::process::{ExitCode, Termination};
+ use std::sync::Arc;
+-use tokio::runtime::Runtime;
+ 
+ #[cfg(target_os = "windows")]
+ #[global_allocator]
+@@ -60,8 +60,9 @@ fn run_workspace(console: &mut EnvConsole, command: BiomeCommand) -> Result<(),
+     // If the `--use-server` CLI flag is set, try to open a connection to an
+     // existing Biome server socket
+     let fs = OsFileSystem::default();
++    #[cfg(not(target_family = "wasm"))]
+     let workspace = if command.should_use_server() {
+-        let runtime = Runtime::new()?;
++        let runtime = tokio::runtime::Runtime::new()?;
+         match open_transport(runtime)? {
+             Some(transport) => workspace::client(transport, Box::new(fs))?,
+             None => return Err(CliDiagnostic::server_not_running()),
+@@ -70,6 +71,10 @@ fn run_workspace(console: &mut EnvConsole, command: BiomeCommand) -> Result<(),
+         let threads = command.get_threads();
+         workspace::server(Arc::new(fs), threads)
+     };
++    // The daemon/server transport is not available on wasm, so always run an
++    // in-process workspace server.
++    #[cfg(target_family = "wasm")]
++    let workspace = workspace::server(Arc::new(fs), command.get_threads());
+ 
+     let session = CliSession::new(&*workspace, console)?;
+     session.run(command)
+diff --git a/crates/biome_fs/src/utils.rs b/crates/biome_fs/src/utils.rs
+index 3531269ba0..5aa9ae7de3 100644
+--- a/crates/biome_fs/src/utils.rs
++++ b/crates/biome_fs/src/utils.rs
+@@ -1,6 +1,5 @@
+ use std::{
+     borrow::Cow,
+-    env,
+     fs::{self, FileType},
+     io::ErrorKind as IoErrorKind,
+     path,
+@@ -22,7 +21,7 @@ pub fn ensure_cache_dir() -> Utf8PathBuf {
+         // Mac: /Users/Alice/Library/Caches/dev.biomejs.biome
+         let cache_dir = proj_dirs.cache_dir().to_path_buf();
+         if let Err(err) = fs::create_dir_all(&cache_dir) {
+-            let temp_dir = env::temp_dir();
++            let temp_dir = temp_dir();
+             warn!(
+                 "Failed to create local cache directory {cache_dir:?} due to error: {err}, fallback to {temp_dir:?}"
+             );
+@@ -31,12 +30,25 @@ pub fn ensure_cache_dir() -> Utf8PathBuf {
+             cache_dir
+         }
+     } else {
+-        env::temp_dir()
++        temp_dir()
+     };
+ 
+     Utf8PathBuf::from_path_buf(path).expect("Failed to parse cache directory path")
+ }
+ 
++/// Returns a directory suitable for temporary/cache files.
++#[cfg(not(target_family = "wasm"))]
++fn temp_dir() -> std::path::PathBuf {
++    std::env::temp_dir()
++}
++
++/// `std::env::temp_dir` is not implemented on WASI and panics when called, so
++/// fall back to a cache directory relative to the current working directory.
++#[cfg(target_family = "wasm")]
++fn temp_dir() -> std::path::PathBuf {
++    std::path::PathBuf::from(".biome-cache")
++}
++
+ /// Normalizes the given `path` without requiring filesystem access.
+ ///
+ /// This only normalizes `.` and `..` entries, but does not resolve symlinks.
+diff --git a/crates/biome_lsp/Cargo.toml b/crates/biome_lsp/Cargo.toml
+index b8667c51a8..cb398d8f3e 100644
+--- a/crates/biome_lsp/Cargo.toml
++++ b/crates/biome_lsp/Cargo.toml
+@@ -36,12 +36,18 @@ papaya               = { workspace = true }
+ rustc-hash           = { workspace = true }
+ serde                = { workspace = true, features = ["derive"] }
+ serde_json           = { workspace = true }
+-tokio                = { workspace = true, features = ["io-std", "rt"] }
++tokio                = { workspace = true, features = ["rt"] }
+ tower-lsp-server     = { workspace = true }
+ tracing              = { workspace = true, features = ["attributes"] }
+ url                  = { workspace = true }
+ uuid                 = { workspace = true, features = ["v4"] }
+ 
++# `io-std` is unsupported by tokio on wasm. biome_lsp is never built for wasm,
++# but cargo unifies feature flags across the whole workspace, so requesting
++# `io-std` unconditionally would break wasm builds of other crates (e.g. the CLI).
++[target.'cfg(not(target_family = "wasm"))'.dependencies]
++tokio = { workspace = true, features = ["io-std"] }
++
+ [dev-dependencies]
+ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+ tower = { workspace = true, features = ["timeout"] }
